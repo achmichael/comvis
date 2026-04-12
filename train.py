@@ -351,7 +351,7 @@ if __name__ == "__main__":
     IMG_SIZE = (128, 128)
     GRAYSCALE = False
     EPOCHS = 10
-    LR = 0.0005
+    LR = 0.0003
     BATCH_SIZE = 32
 
     AUGMENT_TRAIN = False

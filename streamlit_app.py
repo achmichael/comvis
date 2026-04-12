@@ -9,7 +9,7 @@ from models.waste_cnn import WasteCNN
 from predict import load_model_weights
 
 
-MODEL_PATH = Path("outputs/weights/waste_cnn_20260409_150316.npz")
+MODEL_PATH = Path("outputs/weights/waste_cnn_20260412_235626.npz")
 IMG_SIZE = 128
 GRAYSCALE = False
 CLASS_NAMES = ("inorganic", "organic")

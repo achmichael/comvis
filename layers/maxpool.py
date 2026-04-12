@@ -1,5 +1,6 @@
 import numpy as np
 
+
 class MaxPool2D:
     def __init__(self, pool_size=1, stride=1):
         """pool_size: ukuran jendela pooling (misal 2 untuk 2x2)
@@ -8,6 +9,7 @@ class MaxPool2D:
         self.pool_size = pool_size
         self.stride = stride
         self.x = None  # cache untuk backward pass
+        self.max_mask = None
         
         
         
@@ -31,21 +33,20 @@ class MaxPool2D:
         if H_out <= 0 or W_out <= 0:
             raise ValueError("Ukuran output <= 0. Cek pool_size dan stride.")
 
-        out = np.zeros((N, C, H_out, W_out), dtype=np.float32)
+        windows = np.lib.stride_tricks.sliding_window_view(
+            x,
+            window_shape=(P, P),
+            axis=(2, 3),
+        )
 
-        for n in range(N):        # batch
-            for c in range(C):    # channel
-                for i in range(H_out):
-                    for j in range(W_out):
-                        h_start = i * S
-                        h_end = h_start + P
-                        w_start = j * S
-                        w_end = w_start + P
+        if S > 1:
+            windows = windows[:, :, ::S, ::S, :, :]
 
-                        region = x[n, c, h_start:h_end, w_start:w_end]
-                        out[n, c, i, j] = np.max(region)
+        max_vals = np.max(windows, axis=(-2, -1), keepdims=True)
+        self.max_mask = windows == max_vals
 
-        return out
+        out = np.squeeze(max_vals, axis=(-2, -1))
+        return out.astype(np.float32, copy=False)
     
     def backward(self, dout):
         """
@@ -58,22 +59,16 @@ class MaxPool2D:
         H_out = (H - P) // S + 1
         W_out = (W - P) // S + 1
 
-        dx = np.zeros_like(self.x)
+        if self.max_mask is None:
+            raise ValueError("Forward harus dipanggil sebelum backward")
 
-        for n in range(N):
-            for c in range(C):
-                for i in range(H_out):
-                    for j in range(W_out):
-                        h_start = i * S
-                        h_end = h_start + P
-                        w_start = j * S
-                        w_end = w_start + P
+        dx = np.zeros_like(self.x, dtype=np.float32)
 
-                        region = self.x[n, c, h_start:h_end, w_start:w_end]
-                        max_val = np.max(region)
+        # Distribusikan gradien ke semua elemen max (sesuai perilaku implementasi awal).
+        for kh in range(P):
+            h_slice = slice(kh, kh + H_out * S, S)
+            for kw in range(P):
+                w_slice = slice(kw, kw + W_out * S, S)
+                dx[:, :, h_slice, w_slice] += dout * self.max_mask[:, :, :, :, kh, kw]
 
-                        # Set gradien hanya untuk elemen yang merupakan max
-                        mask = (region == max_val)
-                        dx[n, c, h_start:h_end, w_start:w_end] += mask * dout[n, c, i, j]
-
-        return dx
+        return dx.astype(np.float32, copy=False)

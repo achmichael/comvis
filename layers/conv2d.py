@@ -1,5 +1,6 @@
 import numpy as np
 
+
 class Conv2D:
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0):
         self.in_channels = in_channels
@@ -18,6 +19,23 @@ class Conv2D:
         # cache for backward pass
         self.x = None
         self.x_padded = None
+        self.x_cols = None
+        self.output_shape = None
+
+    def _extract_patches(self, x_padded):
+        """Return sliding patches with shape (N, H_out, W_out, C, HH, WW)."""
+        HH, WW = self.kernel_size, self.kernel_size
+        windows = np.lib.stride_tricks.sliding_window_view(
+            x_padded,
+            window_shape=(HH, WW),
+            axis=(2, 3),
+        )
+
+        if self.stride > 1:
+            windows = windows[:, :, :: self.stride, :: self.stride, :, :]
+
+        # (N, C, H_out, W_out, HH, WW) -> (N, H_out, W_out, C, HH, WW)
+        return np.transpose(windows, (0, 2, 3, 1, 4, 5))
         
     def forward(self, x):
         """
@@ -41,20 +59,18 @@ class Conv2D:
         if H_out <= 0 or W_out <= 0:
             raise ValueError("Output dimensions are negative. Check kernel size, stride, and padding.")
         
-        out = np.zeros((N, F, H_out, W_out), dtype=np.float32)
-        
-        for n in range(N):  # loop over batch
-            for f in range(F): # loop over filters
-                for h in range(H_out): # loop over output height
-                    for w in range(W_out): # loop over output width
-                        h_start = h * self.stride
-                        h_end = h_start + HH
-                        w_start = w * self.stride
-                        w_end = w_start + WW
-                        
-                        out[n, f, h, w] = np.sum(self.x_padded[n, :, h_start:h_end, w_start:w_end] * self.Weights[f]) + self.Biases[f]
-        
-        return out
+        patches = self._extract_patches(self.x_padded)
+        self.output_shape = (H_out, W_out)
+
+        # Flatten patches for GEMM: (N*H_out*W_out, C*HH*WW)
+        self.x_cols = patches.reshape(N * H_out * W_out, C * HH * WW)
+        w_cols = self.Weights.reshape(F, -1)
+
+        out_cols = self.x_cols @ w_cols.T
+        out_cols += self.Biases
+
+        out = out_cols.reshape(N, H_out, W_out, F)
+        return np.transpose(out, (0, 3, 1, 2)).astype(np.float32, copy=False)
     
     def backward(self, dout):
         """
@@ -63,23 +79,29 @@ class Conv2D:
         N, F, H_out, W_out = dout.shape
         _, C, H_padded, W_padded = self.x_padded.shape
         HH, WW = self.kernel_size, self.kernel_size
-        
-        self.dW = np.zeros_like(self.Weights)
-        self.db = np.zeros_like(self.Biases)
-        dx_padded = np.zeros_like(self.x_padded)
-        
-        for n in range(N):
-            for f in range(F):
-                for h in range(H_out):
-                    for w in range(W_out):
-                        h_start = h * self.stride
-                        h_end = h_start + HH
-                        w_start = w * self.stride
-                        w_end = w_start + WW
-                        
-                        self.dW[f] += self.x_padded[n, :, h_start:h_end, w_start:w_end] * dout[n, f, h, w]
-                        self.db[f] += dout[n, f, h, w]
-                        dx_padded[n, :, h_start:h_end, w_start:w_end] += self.Weights[f] * dout[n, f, h, w]
+
+        dout_cols = np.transpose(dout, (0, 2, 3, 1)).reshape(N * H_out * W_out, F)
+
+        self.db = np.sum(dout_cols, axis=0).astype(np.float32, copy=False)
+
+        dW_cols = dout_cols.T @ self.x_cols
+        self.dW = dW_cols.reshape(self.Weights.shape).astype(np.float32, copy=False)
+
+        w_cols = self.Weights.reshape(F, -1)
+        dx_cols = dout_cols @ w_cols
+
+        # (N*H_out*W_out, C*HH*WW) -> (N, C, H_out, W_out, HH, WW)
+        dx_cols = dx_cols.reshape(N, H_out, W_out, C, HH, WW)
+        dx_cols = np.transpose(dx_cols, (0, 3, 1, 2, 4, 5))
+
+        dx_padded = np.zeros_like(self.x_padded, dtype=np.float32)
+
+        # Scatter patches back with only kernel-size loops (typically small).
+        for kh in range(HH):
+            h_slice = slice(kh, kh + H_out * self.stride, self.stride)
+            for kw in range(WW):
+                w_slice = slice(kw, kw + W_out * self.stride, self.stride)
+                dx_padded[:, :, h_slice, w_slice] += dx_cols[:, :, :, :, kh, kw]
         
         # Unpad dx if padding was added
         if self.padding > 0:
@@ -87,7 +109,7 @@ class Conv2D:
         else:
             dx = dx_padded
         
-        return dx
+        return dx.astype(np.float32, copy=False)
 
     def update(self, lr):
         self.Weights -= lr * self.dW
