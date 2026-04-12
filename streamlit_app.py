@@ -10,7 +10,7 @@ from predict import load_model_weights
 
 
 MODEL_PATH = Path("outputs/weights/waste_cnn_20260409_150316.npz")
-IMG_SIZE = 32
+IMG_SIZE = 128
 GRAYSCALE = False
 CLASS_NAMES = ("inorganic", "organic")
 

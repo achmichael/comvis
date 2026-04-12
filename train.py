@@ -9,6 +9,7 @@ import numpy as np
 
 from dataset.loader import load_dataset
 from dataset.preprocess import (
+    augment_batch,
     collect_image_paths,
     normalize_image,
     read_image,
@@ -175,6 +176,12 @@ def train(
     lr=0.001,
     batch_size=8,
     optimizer=None,
+    augment_train: bool = True,
+    augmentation_seed: int = 42,
+    horizontal_flip_prob: float = 0.5,
+    vertical_flip_prob: float = 0.5,
+    rotation_range: Tuple[float, float] = (-15.0, 15.0),
+    brightness_range: Tuple[float, float] = (0.9, 1.1),
 ):
     criterion = SoftmaxCrossEntropy()
 
@@ -191,12 +198,24 @@ def train(
         "val_acc": [],
     }
 
+    aug_rng = np.random.default_rng(augmentation_seed) if augment_train else None
+
     for epoch in range(epochs):
         total_loss = 0.0
         total_acc = 0.0
         total_samples = 0
 
         for xb, yb in create_batches(X_train, y_train, batch_size=batch_size, shuffle=True):
+            if augment_train:
+                xb = augment_batch(
+                    xb,
+                    rng=aug_rng,
+                    horizontal_flip_prob=horizontal_flip_prob,
+                    vertical_flip_prob=vertical_flip_prob,
+                    rotation_range=rotation_range,
+                    brightness_range=brightness_range,
+                )
+
             logits = model.forward(xb)
 
             yb_onehot = one_hot(yb, num_classes)
@@ -329,11 +348,18 @@ def plot_training_history(history: Dict[str, List[float]], output_path: Path) ->
 if __name__ == "__main__":
     ensure_output_dirs()
 
-    IMG_SIZE = (32, 32)
+    IMG_SIZE = (128, 128)
     GRAYSCALE = False
     EPOCHS = 10
     LR = 0.0005
     BATCH_SIZE = 32
+
+    AUGMENT_TRAIN = False
+    AUGMENT_HORIZONTAL_FLIP_PROB = 0.5
+    AUGMENT_VERTICAL_FLIP_PROB = 0.5
+    AUGMENT_ROTATION_RANGE = (-15.0, 15.0)
+    AUGMENT_BRIGHTNESS_RANGE = (0.9, 1.1)
+    AUGMENTATION_SEED = 42
 
     # Batasi hanya 5 image pertama untuk debug proses preprocessing.
     DEBUG_PREPROCESS_LIMIT = 5
@@ -374,6 +400,15 @@ if __name__ == "__main__":
 
     print(f"Split data -> train: {len(X_train)}, val: {len(X_val)}, test: {len(X_test)}")
 
+    if AUGMENT_TRAIN:
+        print(
+            "Augmentasi train aktif | "
+            f"hflip={AUGMENT_HORIZONTAL_FLIP_PROB}, "
+            f"vflip={AUGMENT_VERTICAL_FLIP_PROB}, "
+            f"rotation={AUGMENT_ROTATION_RANGE}, "
+            f"brightness={AUGMENT_BRIGHTNESS_RANGE}"
+        )
+
     num_classes = len(class_map)
     in_channels = 1 if GRAYSCALE else 3
     model = WasteCNN(input_size=IMG_SIZE[0], in_channels=in_channels, num_classes=num_classes)
@@ -388,6 +423,12 @@ if __name__ == "__main__":
         epochs=EPOCHS,
         lr=LR,
         batch_size=BATCH_SIZE,
+        augment_train=AUGMENT_TRAIN,
+        augmentation_seed=AUGMENTATION_SEED,
+        horizontal_flip_prob=AUGMENT_HORIZONTAL_FLIP_PROB,
+        vertical_flip_prob=AUGMENT_VERTICAL_FLIP_PROB,
+        rotation_range=AUGMENT_ROTATION_RANGE,
+        brightness_range=AUGMENT_BRIGHTNESS_RANGE,
     )
 
     criterion = SoftmaxCrossEntropy()
