@@ -4,7 +4,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+# pyrefly: ignore [missing-import]
 import matplotlib.pyplot as plt
+# pyrefly: ignore [missing-import]
 import numpy as np
 
 from dataset.loader import load_dataset
@@ -350,11 +352,11 @@ if __name__ == "__main__":
 
     IMG_SIZE = (128, 128)
     GRAYSCALE = False
-    EPOCHS = 10
+    EPOCHS = 50
     LR = 0.0003
     BATCH_SIZE = 32
 
-    AUGMENT_TRAIN = False
+    AUGMENT_TRAIN = True
     AUGMENT_HORIZONTAL_FLIP_PROB = 0.5
     AUGMENT_VERTICAL_FLIP_PROB = 0.5
     AUGMENT_ROTATION_RANGE = (-15.0, 15.0)
