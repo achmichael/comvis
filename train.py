@@ -145,7 +145,50 @@ def trace_preprocessing_steps(
     return trace_path, preview_paths
 
 
+class EarlyStopping:
+    """Early stopping: monitor val_loss, stop jika tidak membaik selama `patience` epoch.
+
+    Cara kerja patience dan min_delta:
+    - patience: jumlah epoch berturut-turut tanpa perbaikan yang ditoleransi.
+      Jika val_loss tidak membaik selama `patience` epoch, training dihentikan.
+    - min_delta: ambang minimum penurunan loss agar dianggap "membaik".
+      Perbaikan dihitung sebagai: best_loss - val_loss > min_delta.
+      Ini mencegah training berlanjut hanya karena penurunan loss yang sangat kecil
+      (noise), bukan perbaikan nyata.
+
+    Contoh: patience=5, min_delta=0.001
+    - Epoch 10: val_loss=0.500 (best) -> counter=0
+    - Epoch 11: val_loss=0.500 (0.500-0.500=0.000, tidak > 0.001) -> counter=1
+    - Epoch 12: val_loss=0.498 (0.500-0.498=0.002, > 0.001, membaik!) -> counter=0, best=0.498
+    - Epoch 13-17: val_loss naik terus -> counter=1,2,3,4,5 -> STOP, restore best weights
+    """
+
+    def __init__(self, patience: int = 5, min_delta: float = 0.001):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.best_loss = float("inf")
+        self.counter = 0
+        self.should_stop = False
+        self.best_weights = None
+
+    def step(self, val_loss: float, model) -> None:
+        if self.best_loss - val_loss > self.min_delta:
+            # Val loss membaik
+            self.best_loss = val_loss
+            self.best_weights = model.get_weights_copy()
+            self.counter = 0
+        else:
+            # Tidak membaik
+            self.counter += 1
+
+        if self.counter >= self.patience:
+            self.should_stop = True
+            if self.best_weights is not None:
+                model.set_weights(self.best_weights)
+
+
 def evaluate(model, criterion, X, y, num_classes, batch_size=32):
+    """Hanya forward pass + hitung loss & acc. Tidak ada backward/update."""
     total_loss = 0.0
     total_acc = 0.0
     total_samples = 0
@@ -167,6 +210,62 @@ def evaluate(model, criterion, X, y, num_classes, batch_size=32):
     return total_loss / total_samples, total_acc / total_samples
 
 
+def train_one_epoch(
+    model,
+    X_train,
+    y_train,
+    num_classes,
+    criterion,
+    optimizer,
+    batch_size=8,
+    augment_train: bool = True,
+    aug_rng=None,
+    horizontal_flip_prob: float = 0.5,
+    vertical_flip_prob: float = 0.5,
+    rotation_range: Tuple[float, float] = (-15.0, 15.0),
+    brightness_range: Tuple[float, float] = (0.9, 1.1),
+):
+    """Satu epoch training: forward -> loss -> backward -> update."""
+    total_loss = 0.0
+    total_acc = 0.0
+    total_samples = 0
+
+    for xb, yb in create_batches(X_train, y_train, batch_size=batch_size, shuffle=True):
+        if augment_train:
+            xb = augment_batch(
+                xb,
+                rng=aug_rng,
+                horizontal_flip_prob=horizontal_flip_prob,
+                vertical_flip_prob=vertical_flip_prob,
+                rotation_range=rotation_range,
+                brightness_range=brightness_range,
+            )
+
+        logits = model.forward(xb)
+
+        yb_onehot = one_hot(yb, num_classes)
+        loss = criterion.forward(logits, yb_onehot)
+
+        grad = criterion.backward()
+        model.backward(grad)
+        optimizer.step()
+
+        acc = accuracy_from_logits(logits, yb)
+
+        total_loss += loss * len(xb)
+        total_acc += acc * len(xb)
+        total_samples += len(xb)
+
+    train_loss = total_loss / total_samples
+    train_acc = total_acc / total_samples
+    return train_loss, train_acc
+
+
+def validate(model, criterion, X_val, y_val, num_classes, batch_size=32):
+    """Validasi: hanya forward pass, tidak ada backward/update."""
+    return evaluate(model, criterion, X_val, y_val, num_classes, batch_size)
+
+
 def train(
     model,
     X_train,
@@ -174,7 +273,6 @@ def train(
     X_val,
     y_val,
     num_classes,
-    epochs=10,
     lr=0.001,
     batch_size=8,
     optimizer=None,
@@ -184,6 +282,8 @@ def train(
     vertical_flip_prob: float = 0.5,
     rotation_range: Tuple[float, float] = (-15.0, 15.0),
     brightness_range: Tuple[float, float] = (0.9, 1.1),
+    patience: int = 5,
+    min_delta: float = 0.001,
 ):
     criterion = SoftmaxCrossEntropy()
 
@@ -191,6 +291,8 @@ def train(
         optimizer = SGD(model.layers, lr=lr)
     elif hasattr(optimizer, "set_layers"):
         optimizer.set_layers(model.layers)
+
+    early_stopping = EarlyStopping(patience=patience, min_delta=min_delta)
 
     history = {
         "epoch": [],
@@ -202,60 +304,53 @@ def train(
 
     aug_rng = np.random.default_rng(augmentation_seed) if augment_train else None
 
-    for epoch in range(epochs):
-        total_loss = 0.0
-        total_acc = 0.0
-        total_samples = 0
+    epoch = 0
 
-        for xb, yb in create_batches(X_train, y_train, batch_size=batch_size, shuffle=True):
-            if augment_train:
-                xb = augment_batch(
-                    xb,
-                    rng=aug_rng,
-                    horizontal_flip_prob=horizontal_flip_prob,
-                    vertical_flip_prob=vertical_flip_prob,
-                    rotation_range=rotation_range,
-                    brightness_range=brightness_range,
-                )
+    while True:
+        epoch += 1
 
-            logits = model.forward(xb)
-
-            yb_onehot = one_hot(yb, num_classes)
-            loss = criterion.forward(logits, yb_onehot)
-
-            grad = criterion.backward()
-            model.backward(grad)
-            optimizer.step()
-
-            acc = accuracy_from_logits(logits, yb)
-
-            total_loss += loss * len(xb)
-            total_acc += acc * len(xb)
-            total_samples += len(xb)
-
-        train_loss = total_loss / total_samples
-        train_acc = total_acc / total_samples
-
-        val_loss, val_acc = evaluate(
+        train_loss, train_acc = train_one_epoch(
             model,
-            criterion,
-            X_val,
-            y_val,
+            X_train,
+            y_train,
             num_classes=num_classes,
+            criterion=criterion,
+            optimizer=optimizer,
             batch_size=batch_size,
+            augment_train=augment_train,
+            aug_rng=aug_rng,
+            horizontal_flip_prob=horizontal_flip_prob,
+            vertical_flip_prob=vertical_flip_prob,
+            rotation_range=rotation_range,
+            brightness_range=brightness_range,
         )
 
-        history["epoch"].append(epoch + 1)
+        val_loss, val_acc = validate(
+            model, criterion, X_val, y_val,
+            num_classes=num_classes, batch_size=batch_size,
+        )
+
+        history["epoch"].append(epoch)
         history["train_loss"].append(float(train_loss))
         history["train_acc"].append(float(train_acc))
         history["val_loss"].append(float(val_loss))
         history["val_acc"].append(float(val_acc))
 
         print(
-            f"Epoch {epoch+1:02d} | "
+            f"Epoch {epoch:02d} | "
             f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | "
             f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f}"
         )
+
+        early_stopping.step(val_loss, model)
+
+        if early_stopping.should_stop:
+            print(
+                f"Early stopping at epoch {epoch} | "
+                f"Best val_loss: {early_stopping.best_loss:.4f} | "
+                f"Patience: {patience}"
+            )
+            break
 
     return history
 
@@ -352,9 +447,10 @@ if __name__ == "__main__":
 
     IMG_SIZE = (128, 128)
     GRAYSCALE = False
-    EPOCHS = 50
     LR = 0.0003
     BATCH_SIZE = 32
+    PATIENCE = 5
+    MIN_DELTA = 0.001
 
     AUGMENT_TRAIN = True
     AUGMENT_HORIZONTAL_FLIP_PROB = 0.5
@@ -413,6 +509,11 @@ if __name__ == "__main__":
 
     num_classes = len(class_map)
     in_channels = 1 if GRAYSCALE else 3
+
+    print("input size: " + str(IMG_SIZE[0]))
+    print("in channels: " + str(in_channels))
+    print("num classes: " + str(num_classes))
+
     model = WasteCNN(input_size=IMG_SIZE[0], in_channels=in_channels, num_classes=num_classes)
 
     history = train(
@@ -422,7 +523,6 @@ if __name__ == "__main__":
         X_val,
         y_val,
         num_classes=num_classes,
-        epochs=EPOCHS,
         lr=LR,
         batch_size=BATCH_SIZE,
         augment_train=AUGMENT_TRAIN,
@@ -431,6 +531,8 @@ if __name__ == "__main__":
         vertical_flip_prob=AUGMENT_VERTICAL_FLIP_PROB,
         rotation_range=AUGMENT_ROTATION_RANGE,
         brightness_range=AUGMENT_BRIGHTNESS_RANGE,
+        patience=PATIENCE,
+        min_delta=MIN_DELTA,
     )
 
     criterion = SoftmaxCrossEntropy()

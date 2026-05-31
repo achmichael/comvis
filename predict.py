@@ -1,4 +1,5 @@
 import argparse
+import logging
 from pathlib import Path
 from typing import List, Sequence
 
@@ -6,6 +7,9 @@ import numpy as np
 
 from dataset.preprocess import preprocess_image
 from models.waste_cnn import WasteCNN
+from utils.logging_utils import setup_pipeline_logger
+
+logger = logging.getLogger("cnn_pipeline")
 
 
 def _parse_class_names(raw: str) -> List[str]:
@@ -63,6 +67,7 @@ def predict_image(
 	class_names: Sequence[str],
 	img_size: int,
 	grayscale: bool,
+	verbose_log: bool = False,
 ) -> tuple[str, float, np.ndarray]:
 	if not image_path.exists():
 		raise FileNotFoundError(f"File image tidak ditemukan: {image_path}")
@@ -75,12 +80,17 @@ def predict_image(
 	)
 
 	x = np.expand_dims(image_chw, axis=0).astype(np.float32)
-	logits = model.forward(x)
+	logits = model.forward(x, verbose_log=verbose_log)
 	probs = _softmax(logits)[0]
 
 	pred_idx = int(np.argmax(probs))
 	pred_label = class_names[pred_idx]
 	confidence = float(probs[pred_idx])
+
+	if verbose_log:
+		logger.info(f"Final Prediction: {pred_label} (confidence: {confidence:.4f})")
+		for idx, cls in enumerate(class_names):
+			logger.info(f"  {cls}: {float(probs[idx]):.4f}")
 
 	return pred_label, confidence, probs
 
@@ -115,6 +125,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
 		default="inorganic,organic",
 		help="Daftar nama kelas dipisah koma sesuai indeks model",
 	)
+	parser.add_argument(
+		"--verbose_log",
+		action="store_true",
+		help="Aktifkan logging detail proses forward pass CNN",
+	)
 	return parser
 
 
@@ -133,6 +148,9 @@ def main() -> None:
 	model_path = Path(args.model_path)
 	image_path = Path(args.image_path)
 
+	if args.verbose_log:
+		setup_pipeline_logger()
+
 	load_model_weights(model, model_path)
 	pred_label, confidence, probs = predict_image(
 		model,
@@ -140,6 +158,7 @@ def main() -> None:
 		class_names=class_names,
 		img_size=args.img_size,
 		grayscale=args.grayscale,
+		verbose_log=args.verbose_log,
 	)
 
 	print(f"Image path  : {image_path}")

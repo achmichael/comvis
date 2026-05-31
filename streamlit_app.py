@@ -1,15 +1,19 @@
 from pathlib import Path
 from typing import Dict, Tuple
 
+import logging
 import numpy as np
 import streamlit as st
 from PIL import Image
 
 from models.waste_cnn import WasteCNN
 from predict import load_model_weights
+from utils.logging_utils import setup_pipeline_logger, log_tensor
+
+logger = logging.getLogger("cnn_pipeline")
 
 
-MODEL_PATH = Path("outputs/weights/waste_cnn_20260518_173300.npz")
+MODEL_PATH = Path("outputs/weights/waste_cnn_20260531_173640.npz")
 IMG_SIZE = 128
 GRAYSCALE = False
 CLASS_NAMES = ("inorganic", "organic")
@@ -455,9 +459,9 @@ def load_inference_model(model_path: str) -> WasteCNN:
     return model
 
 
-def run_inference(model: WasteCNN, image: Image.Image) -> Tuple[str, float, np.ndarray]:
+def run_inference(model: WasteCNN, image: Image.Image, verbose_log: bool = False) -> Tuple[str, float, np.ndarray]:
     x = np.expand_dims(preprocess_uploaded_image(image), axis=0)
-    logits = model.forward(x)
+    logits = model.forward(x, verbose_log=verbose_log)
     probs = softmax(logits)[0]
     pred_idx = int(np.argmax(probs))
     pred_label = CLASS_NAMES[pred_idx]
@@ -594,6 +598,11 @@ def main() -> None:
     # Two-column layout
     col_left, col_right = st.columns([1.1, 0.9], gap="large")
 
+    # Toggle logging
+    verbose_log = st.sidebar.checkbox("🔍 Aktifkan Pipeline Logging", value=False)
+    if verbose_log:
+        setup_pipeline_logger()
+
     # ── LEFT: Upload ──
     with col_left:
         st.markdown(
@@ -641,8 +650,13 @@ def main() -> None:
             st.warning("Model belum siap. Periksa path model lalu refresh halaman.")
         else:
             with st.spinner("Menganalisis gambar..."):
-                pred_label, confidence, probs = run_inference(model, preview_image)
+                pred_label, confidence, probs = run_inference(model, preview_image, verbose_log=verbose_log)
             render_result(pred_label, confidence, probs)
+
+            if verbose_log:
+                st.markdown("---")
+                st.markdown("##### 📋 Pipeline Log")
+                st.info("Log detail proses CNN tersimpan di `outputs/logs/pipeline_trace_*.log`")
 
     # Footer
     st.markdown(
